@@ -79,6 +79,7 @@ export interface TransformDiagnostics extends RepairDiagnostics {
   targetProvider: ProviderType
   idNormalizations: number
   signedThinkingDowngraded: number
+  sameModelThinkingDropped: number
   anthropicToolResultMessagesCompiled: number
   anthropicToolResultBlocksCompiled: number
   anthropicStrayToolMessagesTextified: number
@@ -108,6 +109,7 @@ export function createTransformDiagnostics(targetProvider: ProviderType, inputMe
     ...createRepairDiagnostics(inputMessages),
     idNormalizations: 0,
     signedThinkingDowngraded: 0,
+    sameModelThinkingDropped: 0,
     anthropicToolResultMessagesCompiled: 0,
     anthropicToolResultBlocksCompiled: 0,
     anthropicStrayToolMessagesTextified: 0,
@@ -133,6 +135,7 @@ export function hasTransformMutations(diagnostics: TransformDiagnostics): boolea
   return hasRepairMutations(diagnostics)
     || diagnostics.idNormalizations > 0
     || diagnostics.signedThinkingDowngraded > 0
+    || diagnostics.sameModelThinkingDropped > 0
     || diagnostics.anthropicToolResultMessagesCompiled > 0
     || diagnostics.anthropicToolResultBlocksCompiled > 0
     || diagnostics.anthropicStrayToolMessagesTextified > 0
@@ -247,11 +250,12 @@ function toAnthropicToolResultMessage(toolMessages: LLMMessage[], toolUses: Arra
   }
 }
 
-function normalizeIdsAndThinking(messages: LLMMessage[], targetProvider: ProviderType, targetSourceModel?: string): { messages: LLMMessage[], idNormalizations: number, signedThinkingDowngraded: number } {
+function normalizeIdsAndThinking(messages: LLMMessage[], targetProvider: ProviderType, targetSourceModel?: string): { messages: LLMMessage[], idNormalizations: number, signedThinkingDowngraded: number, sameModelThinkingDropped: number } {
   const normalizeId = getNormalizer(targetProvider)
   const toolCallIdMap = new Map<string, string>()
   let idNormalizations = 0
   let signedThinkingDowngraded = 0
+  let sameModelThinkingDropped = 0
 
   const getNormalizedId = (id: string): string => {
     const existing = toolCallIdMap.get(id)
@@ -265,7 +269,7 @@ function normalizeIdsAndThinking(messages: LLMMessage[], targetProvider: Provide
   }
 
   return {
-    messages: messages.map((msg): LLMMessage => {
+    messages: messages.map((msg): LLMMessage | null => {
       if (msg.role === 'tool') {
         const originalId = msg.toolCallId ?? ''
         return {
@@ -282,7 +286,14 @@ function normalizeIdsAndThinking(messages: LLMMessage[], targetProvider: Provide
           }
           else if (block.type === 'thinking') {
             if (targetProvider === 'openai-chat') {
-              // OpenAI Chat 不支持 thinking 块 — 降级为 text
+              if (targetSourceModel && block.sourceModel === targetSourceModel) {
+                // 同 model 的思考是 chat provider 自己从 reasoning_content 收的,
+                // Chat Completions 没有回传思考的字段 (DeepSeek 回传会 400) — 直接丢弃。
+                // agent 主链路上 OpenAIChatConversationCodec 会先剥离 thinking, 此处是防御兜底
+                sameModelThinkingDropped++
+                continue
+              }
+              // 跨来源 thinking 无法回传 — 降级为 text 保留上下文
               signedThinkingDowngraded++
               if (block.text) transformedContent.push({ type: 'text', text: block.text })
             }
@@ -319,6 +330,11 @@ function normalizeIdsAndThinking(messages: LLMMessage[], targetProvider: Provide
             transformedContent.push(block)
           }
         }
+        if (transformedContent.length === 0) {
+          // 剥离后无 text/tool_use — 与 OpenAIChatConversationCodec 对齐, 整条丢弃,
+          // 否则会编码成 content:'' 被严格网关拒绝
+          return null
+        }
         return { ...msg, content: transformedContent }
       }
 
@@ -338,9 +354,10 @@ function normalizeIdsAndThinking(messages: LLMMessage[], targetProvider: Provide
       }
 
       return msg
-    }),
+    }).filter((msg): msg is LLMMessage => msg !== null),
     idNormalizations,
     signedThinkingDowngraded,
+    sameModelThinkingDropped,
   }
 }
 
@@ -595,6 +612,7 @@ function transformMessagesDetailed(
   const normalized = normalizeIdsAndThinking(messages, targetProvider, targetSourceModel)
   diagnostics.idNormalizations = normalized.idNormalizations
   diagnostics.signedThinkingDowngraded = normalized.signedThinkingDowngraded
+  diagnostics.sameModelThinkingDropped = normalized.sameModelThinkingDropped
 
   const repairedCanonical = repairConversationHistoryDetailed(normalized.messages)
   const sanitizedCanonical = sanitizeUnsupportedHistoricalTools(repairedCanonical.messages, targetProvider, repairedCanonical.diagnostics)
@@ -602,6 +620,7 @@ function transformMessagesDetailed(
     targetProvider,
     idNormalizations: diagnostics.idNormalizations,
     signedThinkingDowngraded: diagnostics.signedThinkingDowngraded,
+    sameModelThinkingDropped: diagnostics.sameModelThinkingDropped,
     anthropicToolResultMessagesCompiled: diagnostics.anthropicToolResultMessagesCompiled,
     anthropicToolResultBlocksCompiled: diagnostics.anthropicToolResultBlocksCompiled,
     anthropicStrayToolMessagesTextified: diagnostics.anthropicStrayToolMessagesTextified,

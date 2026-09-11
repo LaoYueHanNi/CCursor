@@ -1,6 +1,7 @@
 import type { LLMMessage } from '../handlers/llm/types'
 import { describe, expect, it } from 'vitest'
 import {
+  createTransformDiagnostics,
   normalizeToolCallIdForAnthropic,
   normalizeToolCallIdForOpenAIChat,
   normalizeToolCallIdForOpenAIResponses,
@@ -189,6 +190,45 @@ describe('transformMessages — thinking 降级', () => {
     expect(blocks.every((b: any) => b.type === 'text')).toBe(true)
     expect(blocks[0].text).toBe('I should read the file.')
     expect(blocks[1].text).toBe('Let me check.')
+  })
+
+  it('openai-chat 同 model thinking 直接丢弃（不回传也不降级为 text）', () => {
+    const messages: LLMMessage[] = [
+      { role: 'assistant', content: [
+        { type: 'thinking', text: '设鸡 x 兔 y，x+y=35', sourceModel: 'openai-chat:deepseek-v4.1-flash' },
+        { type: 'text', text: '鸡 23 只，兔 12 只' },
+      ] },
+    ]
+    const diagnostics = createTransformDiagnostics('openai-chat', messages.length)
+    const result = transformMessages(messages, 'openai-chat', diagnostics, 'deepseek-v4.1-flash')
+    const blocks = result[0].content as any[]
+    expect(blocks).toEqual([{ type: 'text', text: '鸡 23 只，兔 12 只' }])
+    expect(diagnostics.sameModelThinkingDropped).toBe(1)
+    expect(diagnostics.signedThinkingDowngraded).toBe(0)
+  })
+
+  it('openai-chat 仅含同 model thinking 的消息剥离后整条丢弃', () => {
+    const messages: LLMMessage[] = [
+      { role: 'assistant', content: [
+        { type: 'thinking', text: '只有思考', sourceModel: 'openai-chat:deepseek-v4.1-flash' },
+      ] },
+      { role: 'user', content: '继续' },
+    ]
+    const result = transformMessages(messages, 'openai-chat', undefined, 'deepseek-v4.1-flash')
+    expect(result.map(msg => msg.role)).toEqual(['user'])
+  })
+
+  it('openai-chat 跨 model thinking 仍降级为 text', () => {
+    const messages: LLMMessage[] = [
+      { role: 'assistant', content: [
+        { type: 'thinking', text: 'from another model', sourceModel: 'openai-chat:qwen3.8-flash' },
+        { type: 'text', text: 'Answer' },
+      ] },
+    ]
+    const result = transformMessages(messages, 'openai-chat', undefined, 'deepseek-v4.1-flash')
+    const blocks = result[0].content as any[]
+    expect(blocks.map((b: any) => b.type)).toEqual(['text', 'text'])
+    expect(blocks[0].text).toBe('from another model')
   })
 
   it('openai-responses 同模型保留 thinking 块', () => {
