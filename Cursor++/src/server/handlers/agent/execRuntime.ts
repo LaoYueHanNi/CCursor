@@ -10,12 +10,32 @@ import {
 import { finalizeToolCall } from './toolLifecycle';
 import { shellToolCallStderrDelta, shellToolCallStdoutDelta } from './stream';
 import { registerBackgroundJob, type AgentSession } from './session';
+import { SHELL_STREAM_MAX_BYTES, SHELL_STREAM_SIDE_BYTES } from './constants';
 import type { ReadContextState } from './contextCatalog';
 import {
     waitForExecClientMessageWithHeartbeat,
     waitForExecStreamCloseWithHeartbeat,
     waitForShellExecEventWithHeartbeat,
 } from './wait';
+
+/**
+ * 有界累积 shell 输出 — 对齐 cursor-agent-exec 的 1 MB cap（Cn = 1048576）。
+ *
+ * 逐 chunk 的 stdout/stderr delta 帧仍然全量流式下发（对齐官方行为），
+ * 但累积串会进入 tool result / turn blob / 内存 cache / sqlite 四条路径，
+ * 必须有界。超限时保留头 512K + 尾 512K，中间以省略标记代替；之后每个
+ * 新 chunk 都是「先拼接后重裁剪」，保证总量始终有界。
+ */
+export function appendBounded(accumulated: string, chunk: string): string {
+    if (chunk.length === 0) return accumulated;
+    if (accumulated.length + chunk.length <= SHELL_STREAM_MAX_BYTES) return accumulated + chunk;
+
+    const combined = accumulated + chunk;
+    const head = combined.slice(0, SHELL_STREAM_SIDE_BYTES);
+    const tail = combined.slice(-SHELL_STREAM_SIDE_BYTES);
+    const elidedChars = combined.length - head.length - tail.length;
+    return `${head}\n...[${elidedChars} chars elided]...\n${tail}`;
+}
 
 /**
  * 归一化 ShellBackgroundReason(toJson 后可能是 enum 字符串名或数字)。
@@ -75,12 +95,12 @@ export async function* finalizeExecTool(params: {
                 const ss = ecm.shellStream as Record<string, unknown> | undefined;
                 if (ss?.stdout) {
                     const chunk = String((ss.stdout as Record<string, unknown>).data ?? '');
-                    stdout += chunk;
+                    stdout = appendBounded(stdout, chunk);
                     if (chunk) yield shellToolCallStdoutDelta(params.callId, chunk, params.modelCallId);
                 }
                 if (ss?.stderr) {
                     const chunk = String((ss.stderr as Record<string, unknown>).data ?? '');
-                    stderr += chunk;
+                    stderr = appendBounded(stderr, chunk);
                     if (chunk) yield shellToolCallStderrDelta(params.callId, chunk, params.modelCallId);
                 }
                 if (ss?.permissionDenied) {

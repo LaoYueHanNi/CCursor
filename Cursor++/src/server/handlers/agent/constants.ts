@@ -21,6 +21,16 @@ export const SHELL_HARD_TIMEOUT_MS = 86_400_000;
 // Compatibility-oriented default in the current implementation.
 export const SHELL_FILE_OUTPUT_THRESHOLD_BYTES = 40_000n;
 
+// Bounded accumulation cap for shell stdout/stderr on the server side.
+//
+// cursor-agent-exec caps each stream at 1 MB (Cn = 1048576); our accumulator
+// replicates that bound so long-running commands cannot push unbounded text
+// through the tool result, turn blob, memory cache and sqlite paths.
+// The accumulated value keeps the head and tail halves so trailing errors
+// survive; per-chunk delta frames still stream in full (official behavior).
+export const SHELL_STREAM_MAX_BYTES = 1_048_576;
+export const SHELL_STREAM_SIDE_BYTES = 524_288;
+
 // Cursor shell timeout behavior enum value.
 //
 // IMPORTANT: 对齐 3.0.16 proto 的 agent.v1.TimeoutBehavior enum:
