@@ -24,6 +24,10 @@ const blobCache = new Map<string, string>();
  */
 export function cacheBlob(blobId: string, blobData: string): void {
     blobCache.set(blobId, blobData);
+    // FIFO 淘汰 — 每次插入后裁剪,防止长会话内存无限增长。
+    // 被淘汰的 blob 若再次被客户端引用,warmup 会从 DB 重建,miss 只多一次 DB 读;
+    // 与 fire-and-forget persistBlob 的竞态窗口容忍(淘汰后 persist 仍在飞行)。
+    cleanupBlobCache();
     persistBlob(blobId, blobData).catch(err => {
         logger.warn({ blobId, error: (err as Error).message }, '[SESSION] persistBlob failed (continuing)');
     });
@@ -80,8 +84,8 @@ export function getCachedBlobsAsMessages(blobIds: string[]): Array<Record<string
     return messages;
 }
 
-/** 清理过期缓存 (简单 LRU，防止内存泄漏) */
-export function cleanupBlobCache(maxSize = 10000): void {
+/** 清理过期缓存 (FIFO: 删除插入序最旧的条目，防止内存泄漏) */
+export function cleanupBlobCache(maxSize = 1000): void {
     if (blobCache.size > maxSize) {
         const keysToDelete = [...blobCache.keys()].slice(0, blobCache.size - maxSize);
         for (const key of keysToDelete) {

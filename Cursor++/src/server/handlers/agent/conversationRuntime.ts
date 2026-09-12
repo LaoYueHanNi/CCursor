@@ -1211,6 +1211,14 @@ export async function* handleConversationRun(
         round: String(round),
       })
     }
+    finally {
+      // LLM 流中断 / provider 抛错时清理模块级编辑诊断 Map —— 它们原本只在
+      // tool_use_done 清理，abort 或异常路径会残留并跨 run 泄漏。同一时刻仅
+      // 一条 LLM 流、event.id 全局唯一，全清安全；工具段不写这三个 Map。
+      editExtractors.clear()
+      editPathSent.clear()
+      editStreamDiagnostics.clear()
+    }
 
     if (pendingToolCalls.length === 0) {
       const transition = route.transitionRound(messages, roundAssistantBlocks)
