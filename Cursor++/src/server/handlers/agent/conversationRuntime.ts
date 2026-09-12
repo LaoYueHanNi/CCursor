@@ -1274,6 +1274,9 @@ export async function* handleConversationRun(
           supportsMcpAuth: parsed.supportsMcpAuth,
           cursorDynamicTools: parsed.cursorDynamicTools,
           projectDir: parsed.env.projectFolder ?? parsed.env.workspacePaths?.[0],
+          // Auto-review (smart mode) preflight — 仅当客户端出站
+          // env.smartModeClassifierAutoModeEnabled === true 时启用
+          smartModeAutoReviewEnabled: parsed.env.smartModeClassifierAutoModeEnabled === true,
         })
         for await (const frame of toolFrames) {
           const completedToolCall = extractCompletedToolCall(frame)

@@ -87,6 +87,10 @@ export const BYOK_REDIRECT = [
   'aiserver.v1.DashboardService/GetSlackInstallUrl',
   'aiserver.v1.DashboardService/ShareCanvas',
   'aiserver.v1.DashboardService/LookupSharedCanvasByKey',
+  // Smart Auto (Auto-review): 客户端对不在允许列表的工具调用发分类请求,
+  // 本地 handler 返回 ALLOW/BLOCK; 审计事件仅上报, stub 即可
+  'aiserver.v1.DashboardService/ClassifySandAutoReview',
+  'aiserver.v1.DashboardService/RecordSandAuditEvents',
   'aiserver.v1.ServerConfigService',
   'aiserver.v1.NetworkService',
   'aiserver.v1.HealthService',

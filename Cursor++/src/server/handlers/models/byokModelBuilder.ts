@@ -364,6 +364,24 @@ function buildLegacyStringRepr(model: ProviderModel): string {
   return `${model.id}[${parts.join(',')}]`
 }
 
+// ── Smart Auto (Auto-review) 分类器模型识别 ──
+
+/**
+ * 客户端判定 Auto-review 是否可用的依据: AvailableModels 响应里任一模型带
+ * supports_smart_mode_classifier = true (modelConfigService.hasSmartModeClassifierModel)。
+ *
+ * 官方分类器模型是 Claude 4.5 Haiku / GPT-5.4 Mini; BYOK 场景按命名识别
+ * Claude 4.5 Haiku 系列 — id / apiModel / displayName 任一命中即可
+ * (覆盖 claude-4-5-haiku / claude-haiku-4-5-20251001 等命名变体)。
+ * providers.json 里显式配置 supportsSmartModeClassifier 可覆盖此推断。
+ */
+const SMART_MODE_CLASSIFIER_NAME_PATTERN = /(?:4[-_.]?5[-_.\s]?haiku|haiku[-_.\s]?4[-_.]?5)/i
+
+export function isSmartModeClassifierModel(model: ProviderModel): boolean {
+  return [model.id, model.apiModel, model.displayName]
+    .some(candidate => SMART_MODE_CLASSIFIER_NAME_PATTERN.test(candidate))
+}
+
 // ── 主构建 ──
 
 function wrapDisplayName(base: string, suffix: string | null): string {
@@ -439,6 +457,7 @@ function buildAvailableModelFromByok(
     contextTokenLimitForMaxMode: contextLimit,
     supportsPlanMode: true,
     supportsSandboxing: model.supportsSandboxing ?? false,
+    supportsSmartModeClassifier: model.supportsSmartModeClassifier ?? isSmartModeClassifierModel(model),
     clientDisplayName: model.displayName,
     serverModelName: model.id,
     namedModelSectionIndex: 0,

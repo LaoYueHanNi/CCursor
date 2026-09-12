@@ -84,6 +84,10 @@ export const BYOK_REDIRECT: readonly string[] = [
   'aiserver.v1.DashboardService/GetSlackInstallUrl',
   'aiserver.v1.DashboardService/ShareCanvas',
   'aiserver.v1.DashboardService/LookupSharedCanvasByKey',
+  // Smart Auto (Auto-review): 客户端对不在允许列表的工具调用发分类请求,
+  // 本地 handler 返回 ALLOW; 审计事件仅上报, stub 即可
+  'aiserver.v1.DashboardService/ClassifySandAutoReview',
+  'aiserver.v1.DashboardService/RecordSandAuditEvents',
   'aiserver.v1.ServerConfigService',
   'aiserver.v1.NetworkService',
   'aiserver.v1.HealthService',
@@ -172,6 +176,13 @@ export interface ProviderModel {
    */
   noMaxTokens?: boolean
   supportsSandboxing?: boolean
+  /**
+   * Smart Auto (Auto-review) 分类器能力标注 —
+   * 客户端读 AvailableModels 响应的 supports_smart_mode_classifier, 决定
+   * "设置 > 代理 > 批准与执行"里 Auto-review 是否可选。
+   * 不填时按模型名自动识别 (Claude 4.5 Haiku 系列, 见 byokModelBuilder)。
+   */
+  supportsSmartModeClassifier?: boolean
   defaultOn?: boolean
   /** Fast 模式 — OpenAI: service_tier=priority / Anthropic: fast-mode beta */
   fastMode?: boolean

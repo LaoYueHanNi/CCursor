@@ -1,5 +1,6 @@
 import type { LogEntry, LogLevel } from './logger'
 import type { RuntimeConfigInit } from './runtime-config'
+import { Readable } from 'node:stream'
 import { fastifyConnectPlugin } from '@connectrpc/connect-fastify'
 import cors from '@fastify/cors'
 /**
@@ -11,6 +12,7 @@ import Fastify from 'fastify'
 import { ensureProvidersFile } from './config/providersStore'
 import { ensureRoutesFile, loadRoutes, toggleByokMode } from './config/routesStore'
 import { closeAgentDatabase, initDatabase } from './database/sqlite'
+import { sanitizeClassifyRequestBody } from './handlers/agent/classifyRequestSanitizer'
 import { enterWindowContext, logger, setLogBroadcast, setLogPush, setLogSubscriberCheck } from './logger'
 import { initRuntimeConfig } from './runtime-config'
 import routes from './services'
@@ -177,6 +179,63 @@ export async function startServer(opts: StartServerOptions): Promise<{ host: str
     if (wid !== null)
       enterWindowContext(wid)
     done()
+  })
+
+  // ClassifySandAutoReview 请求体缓冲与防御性修正 (preParsing)。
+  //
+  // 2026-09-12 实测: Cursor 客户端 (agent-exec shell preflight) 的一次真实分类请求
+  // 曾被 proto3 JSON 解码拒绝 (400 invalid_argument), 客户端重试一次后放弃并回退
+  // 人工审批。为避免任何客户端 JSON 形状再次触发 400, 这里在 Connect 解码前
+  // 把已实测会被拒绝的形状修剪为可解码形式 (丢弃非法字段), 并记录诊断日志。
+  //
+  // 实现注意: connect-fastify 的 handler 从 req.raw (Node 原始请求流) 读取 body
+  // (其 content-type parser 是 noop, req.body 恒为 undefined), Fastify preParsing
+  // 返回的流进不了 Connect —— 因此这里消费原始流后必须用回填流 *替换 req.raw*,
+  // 否则下游读到已消费的空流 ("promised N bytes, received 0")。
+  // 二进制协议 (gRPC/gRPC-Web/Connect proto) 不介入。
+  server.addHook('preParsing', async (req, _reply, payload) => {
+    const url = req.url ?? ''
+    if (!url.startsWith('/aiserver.v1.DashboardService/ClassifySandAutoReview'))
+      return payload
+    const contentType = String(req.headers['content-type'] ?? '')
+    if (!contentType.includes('json'))
+      return payload
+    if (!payload || typeof (payload as { on?: unknown }).on !== 'function')
+      return payload
+    const chunks: Buffer[] = []
+    for await (const chunk of payload as AsyncIterable<Buffer>) chunks.push(chunk)
+    const raw = Buffer.concat(chunks)
+    const text = raw.toString('utf8')
+    let out = raw
+    try {
+      const parsed: unknown = JSON.parse(text)
+      const { value, dropped } = sanitizeClassifyRequestBody(parsed)
+      if (dropped.length > 0) {
+        out = Buffer.from(JSON.stringify(value), 'utf8')
+        logger.warn(
+          { dropped, original: text.slice(0, 2000), sanitized: out.toString('utf8').slice(0, 2000) },
+          '[AUTO-REVIEW] classify request body sanitized',
+        )
+      }
+    }
+    catch (err) {
+      logger.warn(
+        { bodyPreview: text.slice(0, 2000), error: err instanceof Error ? err.message : String(err) },
+        '[AUTO-REVIEW] classify request body is not valid JSON, forwarding as-is',
+      )
+    }
+    // 用回填流替换 req.raw, 供 connect-fastify 读取
+    const replacement = new Readable({ read() {} }) as any
+    replacement.method = req.raw.method
+    replacement.url = req.raw.url
+    replacement.httpVersion = req.raw.httpVersion
+    replacement.socket = req.raw.socket
+    replacement.headers = { ...req.raw.headers, 'content-length': String(out.length) }
+    replacement.push(out)
+    replacement.push(null)
+    req.raw = replacement
+    // Fastify 管线只拿到占位空流 (connect 的 noop parser 不消费它)
+    return Readable.from([])
   })
 
   // Request logging — 通过 logger.xxx() 输出, 由 AsyncLocalStorage 上下文

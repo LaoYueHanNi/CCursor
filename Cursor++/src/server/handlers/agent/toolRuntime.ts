@@ -1,7 +1,9 @@
 import type { AgentServerMessage } from '../../gen/agent_v1_pb';
+import { randomUUID } from 'crypto';
 import { logger } from '../../logger';
 import type { ProviderRoundContext } from '../llm/providerRuntime';
 import type { LLMContentBlock, LLMMessage } from '../llm/types';
+import { classifySmartAutoReview } from './smartAutoReviewClassifier';
 import {
     parseDynamicToolsQuery,
     renderDynamicToolsResult,
@@ -36,6 +38,34 @@ import type { ParsedRunRequest } from './protocol/types';
 import type { ReadContextState } from './contextCatalog';
 
 type SubagentModelOverride = ParsedRunRequest['subagentModelOverrides'][number];
+
+/**
+ * 从会话消息构造分类器的对话上下文 (最近几条 user/assistant 文本)。
+ * 供 haiku 判断"项目内删除 vs 工作区外删除"等语境差异。
+ */
+function buildClassifierConversationContext(messages: LLMMessage[], max = 6): Array<{ role: string, content: string }> {
+    const out: Array<{ role: string, content: string }> = [];
+    for (let i = messages.length - 1; i >= 0 && out.length < max; i--) {
+        const m = messages[i];
+        if (m.role !== 'user' && m.role !== 'assistant')
+            continue;
+        let text = '';
+        if (typeof m.content === 'string') {
+            text = m.content;
+        }
+        else if (Array.isArray(m.content)) {
+            text = m.content
+                .filter((b): b is Extract<LLMContentBlock, { type: 'text' }> => b.type === 'text')
+                .map(b => b.text)
+                .join('\n');
+        }
+        text = text.trim();
+        if (!text)
+            continue;
+        out.unshift({ role: m.role, content: text.slice(0, 2000) });
+    }
+    return out;
+}
 
 function resolveSubagentModel(
     subagentType: string,
@@ -83,6 +113,13 @@ export async function* runToolCall(params: {
     cursorDynamicTools?: CursorDynamicToolDefinition[];
     /** Cursor agent projectDir;大 discovery 结果写入其 agent-tools 子目录。 */
     projectDir?: string;
+    /**
+     * Auto-review (smart mode) 服务端 preflight 开关。
+     * 来自客户端出站 requestContext.env.smartModeClassifierAutoModeEnabled,
+     * 只有用户在 Auto-review 模式下才为 true;Ask Every Time / Run Everything
+     * 保持原有审批语义不受影响。
+     */
+    smartModeAutoReviewEnabled?: boolean;
 }): AsyncGenerator<AgentServerMessage, void, void> {
     yield* runToolCallInner(params);
 }
@@ -334,6 +371,49 @@ async function* runToolCallInner(params: Parameters<typeof runToolCall>[0]): Asy
                 isError: true,
             }));
             return;
+        }
+        // ── Smart (Auto-review) 服务端 preflight ──
+        //
+        // 官方服务器在 turn 循环中对 shell 调用先跑分类器:
+        //   allow → ShellArgs.skip_approval = true,客户端跳过本地审批静默执行;
+        //   block → ShellArgs.smart_mode_approval = {request_id, reason},
+        //           客户端弹审批卡并显示 blockReason,用户批准后执行。
+        // (字段: agent.v1.ShellArgs proto field 12 / 19;客户端 approval gate
+        //  见 agent-exec "approval gate reached" 分支。)
+        //
+        // 仅在 Auto-review 模式 (客户端出站 env.smartModeClassifierAutoModeEnabled
+        // === true) 时启用;分类失败 (fallback) 不改写字段,保持默认人工审批。
+        if (cursorToolType === 'shellToolCall' && params.smartModeAutoReviewEnabled === true) {
+            const command = typeof sanitizedInput.command === 'string' ? sanitizedInput.command : '';
+            const outcome = await classifySmartAutoReview({
+                toolCallId: tc.callId,
+                target: {
+                    action: 'Shell',
+                    arguments: {
+                        command,
+                        workingDirectory: typeof sanitizedInput.workingDirectory === 'string' ? sanitizedInput.workingDirectory : '',
+                    },
+                },
+                conversationContext: buildClassifierConversationContext(params.messages),
+                mode: 'auto_review',
+            });
+            logger.info(
+                {
+                    callId: tc.callId,
+                    commandPreview: command.slice(0, 120),
+                    decision: outcome.decision,
+                    reason: outcome.reason?.slice(0, 200),
+                    fallback: outcome.fallback ?? false,
+                    classifierModel: outcome.classifierModel,
+                },
+                '[AUTO-REVIEW] shell preflight',
+            );
+            if (outcome.decision === 'allow') {
+                args.skipApproval = true;
+            }
+            else if (outcome.reason) {
+                args.smartModeApproval = { requestId: randomUUID(), reason: outcome.reason };
+            }
         }
         const execId = `${tc.callId}-exec`;
         const execMessageId = params.allocateExecMessageId();

@@ -27,6 +27,13 @@ import {
     PrivacyMode,
     GetUsageLimitStatusAndActiveGrantsResponse_UsageLimitPolicyStatusSchema,
 } from '../../gen/aiserver_v1_pb';
+import {
+    SmartModeClassifierDecision,
+    SmartModeClassifierResultSchema,
+    SmartModeClassifierSuccessSchema,
+} from '../../gen/agent_v1_pb';
+import { logger } from '../../logger';
+import { classifySmartAutoReview } from '../../handlers/agent/smartAutoReviewClassifier';
 import { exportCanvasHtml, getCanvasesDir, lookupCanvasByKey, storeCanvas } from '../../handlers/canvas/canvasStore';
 import { fetchManagedSkills } from '../../config/managedSkillsStore';
 import { writeFileSync } from 'node:fs';
@@ -125,5 +132,73 @@ export default (router: ConnectRouter) => {
             if (!meta) return {}
             return { shareId: meta.shareId, shareUrl: `file://${join(meta.dir, 'export.html')}` }
         },
+
+        /**
+         * Smart Auto (Auto-review) 分类器 —— 客户端在 Auto-Review 模式下,
+         * 对不在允许列表的工具调用发此请求, 依据返回值决定直接执行还是人工批准。
+         *
+         * 官方实现: 后端硬编码分类提示词, 用 Claude 4.5 Haiku / GPT-5.4 Mini 判断。
+         * BYOK 实现: 在 providers.json 中找到 Haiku 模型 (claude-4-5-haiku 系列),
+         * 用同样的思路本地判断; 失败时回退放行 (策略见 smartAutoReviewClassifier.ts)。
+         */
+        classifySandAutoReview: async (req) => {
+            logger.info(
+                {
+                    toolCallId: req.args?.toolCallId,
+                    parentConversationId: req.args?.parentConversationId,
+                    action: req.args?.target?.action,
+                    hasArguments: req.args?.target?.arguments !== undefined,
+                    contextCount: req.args?.conversationContext?.length ?? 0,
+                    mode: req.mode,
+                    attemptIndex: req.attemptIndex,
+                },
+                '[AUTO-REVIEW] classify request received',
+            )
+            const outcome = await classifySmartAutoReview({
+                toolCallId: req.args?.toolCallId,
+                target: req.args?.target
+                    ? { action: req.args.target.action, arguments: req.args.target.arguments }
+                    : undefined,
+                conversationContext: req.args?.conversationContext?.map(message => ({
+                    role: message.role,
+                    content: message.content,
+                })),
+                mode: req.mode,
+            });
+
+            logger.info(
+                {
+                    toolCallId: req.args?.toolCallId,
+                    action: req.args?.target?.action,
+                    mode: req.mode,
+                    attemptIndex: req.attemptIndex,
+                    decision: outcome.decision,
+                    fallback: outcome.fallback ?? false,
+                    classifierModel: outcome.classifierModel,
+                },
+                '[AUTO-REVIEW] decision returned',
+            );
+
+            const decision = outcome.decision === 'block'
+                ? SmartModeClassifierDecision.BLOCK
+                : SmartModeClassifierDecision.ALLOW;
+            return {
+                result: create(SmartModeClassifierResultSchema, {
+                    result: {
+                        case: 'success',
+                        value: create(SmartModeClassifierSuccessSchema, {
+                            decision,
+                            // block_reason 仅在阻止时携带, 客户端会显示在批准卡片上
+                            ...(decision === SmartModeClassifierDecision.BLOCK && outcome.reason
+                                ? { blockReason: outcome.reason }
+                                : {}),
+                        }),
+                    },
+                }),
+            }
+        },
+
+        // 审计事件上报 — BYOK 下仅吞掉, 不落盘
+        recordSandAuditEvents: async () => ({}),
     });
 };
