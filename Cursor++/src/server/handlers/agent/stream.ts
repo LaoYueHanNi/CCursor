@@ -64,7 +64,7 @@ import {
   WebSearchToolCallSchema,
   CommunicateUpdateToolCallSchema,
 } from '../../gen/agent_v1_pb'
-import { logger, streamLogger } from '../../logger'
+import { DIAG_LOG_ENABLED, logger, streamLogger } from '../../logger'
 import { AGENT_HEARTBEAT_INTERVAL_MS, IDLE_HINT_AFTER_MS } from './constants'
 import { mapPartialToolName } from './tools'
 
@@ -713,14 +713,17 @@ export async function* translateStream(
     const event = nextResult.value
     eventCount++
 
-    // LLM 事件逐帧详情, 用 debug 级别 (用户可在 Output 面板切 Debug 看细节)
-    streamLogger.debug({
-      type: event.type,
-      n: eventCount,
-      ...('text' in event ? { text: (event as { text: string }).text } : {}),
-      ...('name' in event ? { name: (event as { name: string }).name } : {}),
-      ...('id' in event ? { id: (event as { id: string }).id } : {}),
-    }, '[LLM] event')
+    // LLM 事件逐帧详情 — per-event 热路径，默认关闭时零对象分配；
+    // 调试时设 CCURSOR_DIAG_LOG=1 后可在 Output 面板看逐帧细节
+    if (DIAG_LOG_ENABLED) {
+      streamLogger.debug({
+        type: event.type,
+        n: eventCount,
+        ...('text' in event ? { text: (event as { text: string }).text } : {}),
+        ...('name' in event ? { name: (event as { name: string }).name } : {}),
+        ...('id' in event ? { id: (event as { id: string }).id } : {}),
+      }, '[LLM] event')
+    }
 
     const sideFrames = onEvent?.(event)
     if (sideFrames) {

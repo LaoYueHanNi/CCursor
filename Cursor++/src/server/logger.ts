@@ -155,6 +155,14 @@ export const logger = pino({ level: 'trace' }, channelStream)
 export const streamLogger = pino({ level: 'trace' }, channelStream)
 
 /**
+ * 诊断日志开关 — pino 恒为 trace 级别（过滤在下游 LogOutputChannel），
+ * isLevelEnabled('debug') 恒 true 不可用。热路径上的 per-delta / per-edit
+ * 诊断对象需要显式开关：默认关闭时零分配，设 CCURSOR_DIAG_LOG=1 才发射。
+ * 模块级常量，进程启动时读一次。
+ */
+export const DIAG_LOG_ENABLED = process.env.CCURSOR_DIAG_LOG === '1'
+
+/**
  * 连接 LogOutputChannel。在 extension.activate() 中调用。
  * sink 签名: (level, msg) => channel[level](msg)
  */

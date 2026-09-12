@@ -12,7 +12,7 @@
  */
 
 import type { AgentServerMessage } from '../../gen/agent_v1_pb';
-import { logger } from '../../logger';
+import { DIAG_LOG_ENABLED, logger } from '../../logger';
 import type { ProviderRoundContext } from '../llm/providerRuntime';
 import type { LLMMessage } from '../llm/types';
 import {
@@ -316,20 +316,25 @@ export async function* finalizeEditToolCall(params: {
         return;
     }
 
-    logger.debug({
-        tool: params.toolName,
-        callId,
-        path,
-        planKind: plan.kind,
-        beforeContent: newlineStats(applied.beforeContent),
-        fileText: newlineStats(applied.fileText),
-        streamContent: newlineStats(applied.streamContent),
-        suspicious: {
-            fileTextHasCrCrLf: /\r\r\n/.test(applied.fileText),
-            fileTextMixedLineEndings: newlineStats(applied.fileText).mixed,
-            fileTextHasLargeBlankRun: newlineStats(applied.fileText).maxConsecutiveBlankLines >= 3,
-        },
-    }, '[EDIT_NL] writeArgs newline diagnostics');
+    // 诊断对象只在开关打开时构造 — 默认关闭时零分配（fileText 可能很大，
+    // newlineStats 是全量扫描，不能每次编辑都白算一遍）
+    if (DIAG_LOG_ENABLED) {
+        const fileTextStats = newlineStats(applied.fileText);
+        logger.debug({
+            tool: params.toolName,
+            callId,
+            path,
+            planKind: plan.kind,
+            beforeContent: newlineStats(applied.beforeContent),
+            fileText: fileTextStats,
+            streamContent: newlineStats(applied.streamContent),
+            suspicious: {
+                fileTextHasCrCrLf: /\r\r\n/.test(applied.fileText),
+                fileTextMixedLineEndings: fileTextStats.mixed,
+                fileTextHasLargeBlankRun: fileTextStats.maxConsecutiveBlankLines >= 3,
+            },
+        }, '[EDIT_NL] writeArgs newline diagnostics');
+    }
 
     const clientFileText = normalizeTextForCursorWrite(applied.fileText);
     const writeExecMsgId = params.allocateExecMessageId();

@@ -5,7 +5,7 @@ import type { AgentSession } from './session'
 import type { ToolCallInfo } from './tools'
 import { resolveExecutionToolName } from './tools'
 import { clearDraftCheckpoint, persistConversationCheckpoint } from '../../database/checkpoints'
-import { logger } from '../../logger'
+import { DIAG_LOG_ENABLED, logger } from '../../logger'
 import { resolveProviderRuntime } from '../llm'
 import { decodeBlob } from './blob'
 import { cacheBlob, getCachedBlob } from './blobStore'
@@ -1081,19 +1081,22 @@ export async function* handleConversationRun(
                 const normalizedPath = normalizeDetectedEditPath(extractor.detectedPath)
                 frames.push(partialToolCall(event.id, 'editToolCall', mcid, { path: normalizedPath }))
                 logger.debug({ callId: event.id, path: normalizedPath, rawPath: extractor.detectedPath, mcid }, '[EDIT_T] 2.partialToolCall{path}')
-                const streamDiag = editStreamDiagnostics.get(event.id)
-                logger.debug({
-                  callId: event.id,
-                  tool: current.name,
-                  path: normalizedPath,
-                  rawPath: extractor.detectedPath,
-                  streamedBeforePath: streamDiag ? {
-                    deltaCount: streamDiag.deltaCount,
-                    streamContent: editNewlineStats(streamDiag.streamContent),
-                  } : undefined,
-                  currentDelta: editNewlineStats(event.input),
-                  mcid,
-                }, '[EDIT_NL] edit path detected during stream')
+                // per-delta 诊断含全量 newline 扫描 — 默认关闭时零分配
+                if (DIAG_LOG_ENABLED) {
+                  const streamDiag = editStreamDiagnostics.get(event.id)
+                  logger.debug({
+                    callId: event.id,
+                    tool: current.name,
+                    path: normalizedPath,
+                    rawPath: extractor.detectedPath,
+                    streamedBeforePath: streamDiag ? {
+                      deltaCount: streamDiag.deltaCount,
+                      streamContent: editNewlineStats(streamDiag.streamContent),
+                    } : undefined,
+                    currentDelta: editNewlineStats(event.input),
+                    mcid,
+                  }, '[EDIT_NL] edit path detected during stream')
+                }
               }
               if (content) {
                 const streamDiag = editStreamDiagnostics.get(event.id)
@@ -1119,22 +1122,27 @@ export async function* handleConversationRun(
               const rawArgs = event.arguments ?? current.chunks.join('')
               let input: Record<string, unknown> = {}
               try { input = JSON.parse(rawArgs) } catch {}
-              if (EDIT_TOOL_NAMES.has(current.name)) {
+              if (DIAG_LOG_ENABLED && EDIT_TOOL_NAMES.has(current.name)) {
+                let streamedContent: Record<string, unknown> | undefined
+                if (streamDiag) {
+                  const contentStats = editNewlineStats(streamDiag.streamContent)
+                  streamedContent = {
+                    deltaCount: streamDiag.deltaCount,
+                    stats: contentStats,
+                    suspicious: {
+                      hasCrCrLf: /\r\r\n/.test(streamDiag.streamContent),
+                      mixedLineEndings: contentStats.mixed,
+                      hasLargeBlankRun: contentStats.maxConsecutiveBlankLines >= 3,
+                    },
+                  }
+                }
                 logger.debug({
                   callId: event.id,
                   tool: current.name,
                   pathWasSentDuringStream: pathWasSent,
                   rawArgs: editNewlineStats(rawArgs),
                   targetFields: editToolTargetStats(current.name, input),
-                  streamedContent: streamDiag ? {
-                    deltaCount: streamDiag.deltaCount,
-                    stats: editNewlineStats(streamDiag.streamContent),
-                    suspicious: {
-                      hasCrCrLf: /\r\r\n/.test(streamDiag.streamContent),
-                      mixedLineEndings: editNewlineStats(streamDiag.streamContent).mixed,
-                      hasLargeBlankRun: editNewlineStats(streamDiag.streamContent).maxConsecutiveBlankLines >= 3,
-                    },
-                  } : undefined,
+                  streamedContent,
                 }, '[EDIT_NL] final edit tool arguments newline diagnostics')
               }
               pendingToolCalls.push({ callId: event.id, name: current.name, input })
