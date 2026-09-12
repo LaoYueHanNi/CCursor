@@ -382,6 +382,19 @@ export function isSmartModeClassifierModel(model: ProviderModel): boolean {
     .some(candidate => SMART_MODE_CLASSIFIER_NAME_PATTERN.test(candidate))
 }
 
+/**
+ * 模型是否具备 Smart Auto (Auto-review) 分类能力 —— 客户端
+ * hasSmartModeClassifierModel() 的判定依据就是 AvailableModels 里
+ * 该字段为 true 的模型存在与否, 因此本函数同时用于:
+ *   1. 构建 AvailableModels 的 supports_smart_mode_classifier (客户端可选性);
+ *   2. 服务端 preflight 选取分类器模型 (smartAutoReviewClassifier)。
+ * 两处必须共用同一判定, 否则会出现"客户端允许开启 Auto-review 而服务端
+ * 找不到分类器"的判定分歧 (显式字段配置的非 Haiku 命名模型即此类)。
+ */
+export function hasSmartModeClassifierCapability(model: ProviderModel): boolean {
+  return model.supportsSmartModeClassifier ?? isSmartModeClassifierModel(model)
+}
+
 // ── 主构建 ──
 
 function wrapDisplayName(base: string, suffix: string | null): string {
@@ -457,7 +470,7 @@ function buildAvailableModelFromByok(
     contextTokenLimitForMaxMode: contextLimit,
     supportsPlanMode: true,
     supportsSandboxing: model.supportsSandboxing ?? false,
-    supportsSmartModeClassifier: model.supportsSmartModeClassifier ?? isSmartModeClassifierModel(model),
+    supportsSmartModeClassifier: hasSmartModeClassifierCapability(model),
     clientDisplayName: model.displayName,
     serverModelName: model.id,
     namedModelSectionIndex: 0,

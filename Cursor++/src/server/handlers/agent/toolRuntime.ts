@@ -382,7 +382,9 @@ async function* runToolCallInner(params: Parameters<typeof runToolCall>[0]): Asy
         //  见 agent-exec "approval gate reached" 分支。)
         //
         // 仅在 Auto-review 模式 (客户端出站 env.smartModeClassifierAutoModeEnabled
-        // === true) 时启用;分类失败 (fallback) 不改写字段,保持默认人工审批。
+        // === true) 时启用;allow → skipApproval 静默执行, block (含未配置分类器
+        // 模型的 fail-closed, 见 smartAutoReviewClassifier.ts) → 携带 reason 下发
+        // smartModeApproval, 客户端弹审批卡并展示理由。
         if (cursorToolType === 'shellToolCall' && params.smartModeAutoReviewEnabled === true) {
             const command = typeof sanitizedInput.command === 'string' ? sanitizedInput.command : '';
             const outcome = await classifySmartAutoReview({

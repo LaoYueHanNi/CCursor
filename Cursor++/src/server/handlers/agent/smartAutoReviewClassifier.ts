@@ -8,16 +8,21 @@
  *   由后端调用 Claude 4.5 Haiku / GPT-5.4 Mini 输出 ALLOW / BLOCK。
  *
  * BYOK 场景下"后端"就是本地服务器, 因此本模块复现同样职责:
- *   1. 从 providers.json 里按名称找到 Haiku 分类器模型 (claude-4-5-haiku 系列)
+ *   1. 从 providers.json 找到分类器模型 (supportsSmartModeClassifier 显式字段优先,
+ *      否则按名称识别 Haiku 4.5 系列 — 与客户端 AvailableModels 的可选性判定共用,
+ *      见 byokModelBuilder.hasSmartModeClassifierCapability)
  *   2. 用固定提示词把 (操作 + 参数 + 对话上下文) 交给该模型判断
- *   3. 解析模型输出的 JSON 决策, 失败时回退 ALLOW 并记录日志
+ *   3. 解析模型输出的 JSON 决策, 失败时按下方策略回退并记录日志
  *
- * 失败回退策略: fail-open (放行)。个人 BYOK 环境下优先保证工作流顺畅;
- * 如需收紧, 把 FALLBACK_DECISION 改为 'block' 即可让客户端弹人工批准。
+ * 失败回退策略分两档:
+ *   - 未配置 Haiku 4.5 分类器 (可预知场景) → fail-closed: 固定返回 BLOCK,
+ *     客户端对每条命令弹人工审批卡并提示配置模型, 避免无分类能力时静默放行;
+ *   - 运行时失败 (网络/超时/解析失败, 偶发场景) → 回退 FALLBACK_DECISION,
+ *     默认 fail-open (放行) 优先保证工作流顺畅; 如需收紧改为 'block' 即可。
  */
 import type { JsonObject } from '@bufbuild/protobuf'
 import { flattenModels } from '../../config/providersStore'
-import { isSmartModeClassifierModel } from '../models/byokModelBuilder'
+import { hasSmartModeClassifierCapability } from '../models/byokModelBuilder'
 import { resolveProviderRuntime } from '../llm'
 import { logger } from '../../logger'
 
@@ -29,8 +34,13 @@ const CLASSIFIER_MAX_OUTPUT_TOKENS = 300
 const MAX_ARGUMENT_CHARS = 6000
 /** 嵌入提示词的对话上下文字符上限 */
 const MAX_CONTEXT_CHARS = 4000
-/** 模型调用/解析失败时的回退决策 */
+/** 运行时调用/解析失败 (偶发) 时的回退决策 — 未配置模型场景不走此路径 */
 const FALLBACK_DECISION: 'allow' | 'block' = 'allow'
+/**
+ * 未配置 Haiku 4.5 分类器时的固定阻止理由 (fail-closed)。
+ * 客户端审批卡会原样展示此文案, 引导用户先补齐分类器模型再启用 Auto-review。
+ */
+export const MISSING_CLASSIFIER_REASON = '请配置haiku4.5模型,先分析再改动'
 
 export interface SmartAutoReviewTarget {
   action?: string
@@ -52,7 +62,7 @@ export interface SmartAutoReviewInput {
 export interface SmartAutoReviewOutcome {
   decision: 'allow' | 'block'
   reason?: string
-  /** true = 模型调用或解析失败, 采用了回退决策 */
+  /** true = 未执行成功分类 (未配置模型/调用失败/解析失败), 采用了非模型判定 */
   fallback?: boolean
   /** 实际执行分类的模型 (apiModel 名) */
   classifierModel?: string
@@ -85,9 +95,15 @@ Reply with STRICT JSON only, no markdown, no code fences:
 or
 {"decision":"block","reason":"<one short sentence>"}`
 
-/** 从 providers.json 找到分类器模型; 未配置返回 null */
+/**
+ * 从 providers.json 找到分类器模型; 未配置返回 null。
+ *
+ * 判定与客户端 AvailableModels 的 supports_smart_mode_classifier 完全一致
+ * (见 hasSmartModeClassifierCapability) —— 客户端只有在该字段为 true 的模型
+ * 存在时才允许开启 Auto-review, 两边共用判定才能保证"客户端可开 ⟺ 服务端可分类"。
+ */
 export function findSmartAutoReviewClassifierModelId(): string | null {
-  const hit = flattenModels().find(({ model }) => isSmartModeClassifierModel(model))
+  const hit = flattenModels().find(({ model }) => hasSmartModeClassifierCapability(model))
   return hit?.model.id ?? null
 }
 
@@ -162,13 +178,16 @@ function parseClassifierReply(replyText: string): { decision: 'allow' | 'block',
 
 /**
  * 对一次工具调用执行 Auto-review 分类。
- * 任何失败路径都回退到 FALLBACK_DECISION 并记录日志, 不会抛出。
+ * 不会抛出: 未配置分类器模型时 fail-closed (BLOCK + 固定提示),
+ * 运行时失败时回退 FALLBACK_DECISION, 均记录日志。
  */
 export async function classifySmartAutoReview(input: SmartAutoReviewInput): Promise<SmartAutoReviewOutcome> {
   const modelId = findSmartAutoReviewClassifierModelId()
   if (!modelId) {
-    logger.warn('[AUTO-REVIEW] no classifier model in providers.json (expected a Claude 4.5 Haiku entry) — using fallback decision')
-    return { decision: FALLBACK_DECISION, fallback: true, reason: 'No smart mode classifier model configured' }
+    logger.warn(
+      '[AUTO-REVIEW] no classifier model in providers.json (expected a Claude 4.5 Haiku entry) — blocking every call until one is configured',
+    )
+    return { decision: 'block', fallback: true, reason: MISSING_CLASSIFIER_REASON }
   }
 
   const startedAt = Date.now()
