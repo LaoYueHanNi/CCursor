@@ -984,7 +984,7 @@ export async function* handleConversationRun(
     }
 
     const pendingToolCalls: ToolCallInfo[] = []
-    const inflightToolCalls = new Map<string, { name: string, input: string }>()
+    const inflightToolCalls = new Map<string, { name: string, chunks: string[] }>()
     const roundAssistantBlocks: LLMContentBlock[] = []
     let currentThinking = ''
     let currentText = ''
@@ -1054,7 +1054,7 @@ export async function* handleConversationRun(
               currentThinking,
               currentText,
             }))
-            inflightToolCalls.set(event.id, { name: event.name, input: '' })
+            inflightToolCalls.set(event.id, { name: event.name, chunks: [] })
             if (EDIT_TOOL_NAMES.has(event.name)) {
               editExtractors.set(event.id, new EditDeltaExtractor(event.name))
               editStreamDiagnostics.set(event.id, { deltaCount: 0, streamContent: '' })
@@ -1063,9 +1063,14 @@ export async function* handleConversationRun(
             break
           }
           case 'tool_use_delta': {
-            const current = inflightToolCalls.get(event.id) ?? { name: '', input: '' }
-            const accumulatedInput = current.input + event.input
-            inflightToolCalls.set(event.id, { ...current, input: accumulatedInput })
+            // chunks 收集代替「每次 delta 全量重拼」——大 ApplyPatch 参数流式到达时
+            // 旧写法是平方级拷贝，join 只在 tool_use_done 时做一次。
+            let current = inflightToolCalls.get(event.id)
+            if (!current) {
+              current = { name: '', chunks: [] }
+              inflightToolCalls.set(event.id, current)
+            }
+            current.chunks.push(event.input)
             const extractor = editExtractors.get(event.id)
             if (extractor) {
               const content = extractor.feed(event.input)
@@ -1087,7 +1092,6 @@ export async function* handleConversationRun(
                     streamContent: editNewlineStats(streamDiag.streamContent),
                   } : undefined,
                   currentDelta: editNewlineStats(event.input),
-                  accumulatedInput: editNewlineStats(accumulatedInput),
                   mcid,
                 }, '[EDIT_NL] edit path detected during stream')
               }
@@ -1110,8 +1114,9 @@ export async function* handleConversationRun(
             const streamDiag = editStreamDiagnostics.get(event.id)
             const current = inflightToolCalls.get(event.id)
             if (current) {
-              // 权威参数: done 事件携带的完整 arguments > delta 累积
-              const rawArgs = event.arguments ?? current.input ?? ''
+              // 权威参数: done 事件携带的完整 arguments > delta 累积（Anthropic/Gemini
+              // 的 tool_use_done 不带 arguments，此时 chunks.join 是唯一来源）
+              const rawArgs = event.arguments ?? current.chunks.join('')
               let input: Record<string, unknown> = {}
               try { input = JSON.parse(rawArgs) } catch {}
               if (EDIT_TOOL_NAMES.has(current.name)) {
