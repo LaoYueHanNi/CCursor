@@ -138,8 +138,10 @@ export default (router: ConnectRouter) => {
          * 对不在允许列表的工具调用发此请求, 依据返回值决定直接执行还是人工批准。
          *
          * 官方实现: 后端硬编码分类提示词, 用 Claude 4.5 Haiku / GPT-5.4 Mini 判断。
-         * BYOK 实现: 在 providers.json 中找到 Haiku 模型 (claude-4-5-haiku 系列),
-         * 用同样的思路本地判断; 失败时回退放行 (策略见 smartAutoReviewClassifier.ts)。
+         * BYOK 实现: 在 providers.json 中定位分类器模型 (判定与客户端 AvailableModels
+         * 对齐), 提示词移植自 Claude Code Auto-Mode 分类器 (见 smartAutoReviewPrompt.ts);
+         * 未配置模型 → fail-closed 固定 BLOCK, 运行时失败 → 回退放行, 策略详见
+         * smartAutoReviewClassifier.ts。
          */
         classifySandAutoReview: async (req) => {
             logger.info(

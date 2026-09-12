@@ -14,6 +14,10 @@
  *   2. 用固定提示词把 (操作 + 参数 + 对话上下文) 交给该模型判断
  *   3. 解析模型输出的 JSON 决策, 失败时按下方策略回退并记录日志
  *
+ * 系统提示词 (SMART_AUTO_REVIEW_SYSTEM_PROMPT) 移植自 Claude Code Auto-Mode
+ * 权限分类器, 保留 HARD/SOFT BLOCK 分级、用户意图规则、ALLOW 强制例外与
+ * 分类流程等完整骨架, 详见 smartAutoReviewPrompt.ts。
+ *
  * 失败回退策略分两档:
  *   - 未配置 Haiku 4.5 分类器 (可预知场景) → fail-closed: 固定返回 BLOCK,
  *     客户端对每条命令弹人工审批卡并提示配置模型, 避免无分类能力时静默放行;
@@ -25,6 +29,7 @@ import { flattenModels } from '../../config/providersStore'
 import { hasSmartModeClassifierCapability } from '../models/byokModelBuilder'
 import { resolveProviderRuntime } from '../llm'
 import { logger } from '../../logger'
+import { SMART_AUTO_REVIEW_SYSTEM_PROMPT } from './smartAutoReviewPrompt'
 
 /** 分类模型调用超时 — 超时后回退, 不长时间阻塞工具执行流程 */
 const CLASSIFY_TIMEOUT_MS = 15_000
@@ -67,33 +72,6 @@ export interface SmartAutoReviewOutcome {
   /** 实际执行分类的模型 (apiModel 名) */
   classifierModel?: string
 }
-
-const CLASSIFIER_SYSTEM_PROMPT = `You are the Auto-review security classifier for a coding agent running on the user's machine.
-
-You receive one proposed tool call (action + arguments) together with recent conversation context. Decide whether it may execute AUTOMATICALLY without interrupting the user for manual approval.
-
-ALLOW routine development work:
-- reading, searching, listing files and git queries
-- builds, tests, linters, formatting, package installs from standard registries
-- starting/stopping dev servers and other local project tooling
-- creating, editing or deleting files INSIDE the project workspace
-- local git commits, branches, stash, diffs
-
-BLOCK anything risky, destructive, or irreversible, for example:
-- destructive filesystem operations: rm -rf on system/home paths, disk formatting, mass deletion outside a build artifact directory
-- writing or modifying files OUTSIDE the project workspace (system dirs, ~/.ssh, other projects) — the user can approve with one click
-- reading or exfiltrating credentials/secrets: env dumps, ~/.ssh, cloud tokens, sending local data to unknown endpoints
-- piping remote content into a shell (curl | sh, iwr | iex), obfuscated or eval payloads
-- privilege escalation (sudo, runas), disabling security tooling, changing system settings
-- destructive git remote operations: force-push, remote branch deletion, history rewriting
-- MCP or external tools performing account-level, billing, or destructive actions
-
-When genuinely uncertain, prefer "block" — the user approves blocked calls with a single click.
-
-Reply with STRICT JSON only, no markdown, no code fences:
-{"decision":"allow","reason":"<one short sentence>"}
-or
-{"decision":"block","reason":"<one short sentence>"}`
 
 /**
  * 从 providers.json 找到分类器模型; 未配置返回 null。
@@ -198,7 +176,7 @@ export async function classifySmartAutoReview(input: SmartAutoReviewInput): Prom
       thinking: false,
       maxTokens: CLASSIFIER_MAX_OUTPUT_TOKENS,
       messages: [
-        { role: 'system', content: CLASSIFIER_SYSTEM_PROMPT },
+        { role: 'system', content: SMART_AUTO_REVIEW_SYSTEM_PROMPT },
         { role: 'user', content: buildClassifierUserMessage(input) },
       ],
     })

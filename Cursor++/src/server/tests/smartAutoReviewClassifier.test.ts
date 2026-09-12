@@ -2,6 +2,7 @@ import type { ProvidersConfig } from '../data/defaults'
 import { expect, it, vi } from 'vitest'
 import { setProvidersForTests } from '../config/providersStore'
 import { classifySmartAutoReview, MISSING_CLASSIFIER_REASON } from '../handlers/agent/smartAutoReviewClassifier'
+import { SMART_AUTO_REVIEW_SYSTEM_PROMPT } from '../handlers/agent/smartAutoReviewPrompt'
 
 /**
  * Auto-review 分类器失败策略回归测试 — 两档策略:
@@ -100,4 +101,38 @@ it('显式 supportsSmartModeClassifier 标注的非 Haiku 命名模型也被服�
   // 找到模型后进入调用路径, mock 的 resolveProviderRuntime 抛错 → 走运行时回退而非 MISSING_CLASSIFIER
   expect(outcome.reason).not.toBe(MISSING_CLASSIFIER_REASON)
   expect(outcome.reason).toContain('provider runtime unavailable')
+})
+
+it('系统提示词保留 Claude Code 移植版骨架锚点, 且无平台专有残留', () => {
+  // 关键骨架锚点 — 移植版的核心结构必须存在
+  for (const anchor of [
+    '## Threat Model',
+    '## User Intent Rule',
+    '## Evaluation Rules',
+    '## HARD BLOCK',
+    '## SOFT BLOCK',
+    '## ALLOW (exceptions)',
+    '## Classification Process',
+    'Irreversible Local Destruction',
+    'Data Exfiltration',
+    'Git Destructive',
+    'UNSEEN TOOL RESULTS',
+    'Session-Created Job Cleanup',
+    '[Exact BLOCK Rule Name]',
+  ]) {
+    expect(SMART_AUTO_REVIEW_SYSTEM_PROMPT).toContain(anchor)
+  }
+  // 平台专有内容必须已被裁剪/泛化 — 防止回归时带入 Claude Code 专属名词
+  for (const removed of [
+    'claude-in-chrome',
+    'Chrome-MCP',
+    '.claude/',
+    'CLAUDE.md',
+    'CronCreate',
+    'RemoteTrigger',
+    '<teammate-message>',
+    'SandboxNetworkAccess',
+  ]) {
+    expect(SMART_AUTO_REVIEW_SYSTEM_PROMPT).not.toContain(removed)
+  }
 })
