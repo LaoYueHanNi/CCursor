@@ -796,6 +796,166 @@ async function* runToolCallInner(params: Parameters<typeof runToolCall>[0]): Asy
     yield finalized.frame;
 }
 
+// ── 只读工具并发支持 ──
+
+/** 只读工具白名单: execArgsType ∈ {readArgs, grepArgs, diagnosticsArgs}。 */
+const READ_ONLY_EXEC_ARGS_TYPES = new Set(['readArgs', 'grepArgs', 'diagnosticsArgs']);
+
+export interface ReadOnlyToolLaunchContext {
+    tc: ToolCallInfo;
+    execMessageId: number;
+    modelCallId: string;
+    startedArgs: Record<string, unknown>;
+    sanitizedInput: Record<string, unknown>;
+    cursorToolType: string;
+}
+
+/**
+ * 判定一个工具调用是否可以走只读并发三段式（Read/Grep/Glob/ReadLints）。
+ *
+ * - Shell 不进白名单: smart mode 审批不可预知，必须保持串行。
+ * - awaitToolCall 借道 readArgs，必须显式排除，否则 AwaitShell 会被误判。
+ * - 解析错误不进白名单，交给串行路径统一产出错误结果。
+ */
+export function isReadOnlyToolLaunchEligible(params: {
+    toolCall: ToolCallInfo;
+    availableMcpTools: AvailableMcpTool[];
+    cursorDynamicTools?: AvailableDynamicBuiltinTool[];
+}): boolean {
+    const resolved = resolveToolCall(
+        params.toolCall.name,
+        params.toolCall.input,
+        params.availableMcpTools,
+        params.cursorDynamicTools,
+    );
+    if (resolved.resolutionError)
+        return false;
+    if (resolved.cursorToolType === 'awaitToolCall')
+        return false;
+    const execArgsType = mapToolToExecArgs(resolved.cursorToolType);
+    return execArgsType !== null && READ_ONLY_EXEC_ARGS_TYPES.has(execArgsType);
+}
+
+/**
+ * Phase 2a: 并发启动只读工具 — 发送 toolCallStarted + exec 后立即返回，不等待结果。
+ *
+ * 构建阶段（buildToolArgs/buildExecArgs）失败时不产生任何帧，返回 null，
+ * 由调用方回退到串行 runToolCall 统一处理（行为与串行路径完全一致）。
+ */
+export async function* launchReadOnlyTool(params: {
+    toolCall: ToolCallInfo;
+    availableMcpTools: AvailableMcpTool[];
+    conversationId: string;
+    currentModelId: string;
+    round: number;
+    session: AgentSession;
+    roundContext: Pick<ProviderRoundContext, 'createToolResult' | 'recordToolResult'>;
+    messages: LLMMessage[];
+    allocateExecMessageId: () => number;
+    cursorDynamicTools?: AvailableDynamicBuiltinTool[];
+}): AsyncGenerator<AgentServerMessage, ReadOnlyToolLaunchContext | null, void> {
+    const tc = params.toolCall;
+    const resolvedTool = resolveToolCall(
+        tc.name,
+        tc.input,
+        params.availableMcpTools,
+        params.cursorDynamicTools,
+    );
+    const cursorToolType = resolvedTool.cursorToolType;
+    const executionToolName = resolvedTool.effectiveToolName ?? tc.name;
+    const modelCallId = `${params.conversationId}-${params.round}-${tc.callId.slice(-4)}`;
+    const execArgsType = mapToolToExecArgs(cursorToolType);
+
+    // 调用方已按同一判据筛选；兜底拒绝时不发帧，交由调用方回退串行。
+    if (resolvedTool.resolutionError
+        || cursorToolType === 'awaitToolCall'
+        || execArgsType === null
+        || !READ_ONLY_EXEC_ARGS_TYPES.has(execArgsType))
+        return null;
+
+    const sanitizedInput = resolvedTool.sanitizedInput;
+    let startedArgs: Record<string, unknown>;
+    let args: Record<string, unknown>;
+    try {
+        startedArgs = buildToolArgs(executionToolName, sanitizedInput, tc.callId, {
+            conversationId: params.conversationId,
+            currentModelId: params.currentModelId,
+        });
+        args = buildExecArgs(executionToolName, sanitizedInput, tc.callId, {
+            conversationId: params.conversationId,
+            currentModelId: params.currentModelId,
+        });
+    }
+    catch (e) {
+        logger.warn({ tool: tc.name, callId: tc.callId, error: e instanceof Error ? e.message : String(e) }, '[TOOL] read-only launch build failed, falling back to serial');
+        return null;
+    }
+
+    yield toolCallStarted(tc.callId, cursorToolType, startedArgs, modelCallId);
+    const execMessageId = params.allocateExecMessageId();
+    yield execMessage(execMessageId, `${tc.callId}-exec`, execArgsType, args);
+
+    return { tc, execMessageId, modelCallId, startedArgs, sanitizedInput, cursorToolType };
+}
+
+/**
+ * Phase 2c: 只读工具收尾 — 用并发等到（或超时/中断）的 exec 结果生成 completed 帧。
+ * 与 finalizeExecTool 的非 shell 分支保持同一结果构造与记录逻辑。
+ */
+export function finalizeLaunchedReadOnlyTool(
+    ctx: ReadOnlyToolLaunchContext,
+    execResult: Record<string, unknown> | null,
+    roundContext: Pick<ProviderRoundContext, 'createToolResult' | 'recordToolResult'>,
+    messages: LLMMessage[],
+    imageCollector?: LLMContentBlock[],
+    readContext?: ReadContextState,
+): AgentServerMessage {
+    let toolResult: ToolResultEnvelope = { result: { case: 'error', value: { message: 'no result' } } };
+    let completedFrame: AgentServerMessage | null = null;
+
+    if (execResult && 'execClientMessage' in execResult) {
+        const ecm = execResult.execClientMessage as Record<string, unknown>;
+        const finalized = finalizeToolCall({
+            roundContext,
+            messages,
+            cursorToolType: ctx.cursorToolType,
+            toolName: ctx.tc.name,
+            callId: ctx.tc.callId,
+            startedArgs: ctx.startedArgs,
+            rawToolResult: buildExecToolResult(ctx.cursorToolType, ecm, ctx.sanitizedInput),
+            input: ctx.sanitizedInput,
+            modelCallId: ctx.modelCallId,
+            readContext,
+        });
+        toolResult = finalized.toolResult;
+        completedFrame = finalized.frame;
+        if (finalized.imageBlock && imageCollector)
+            imageCollector.push(finalized.imageBlock);
+        logger.info({ tool: ctx.tc.name, callId: ctx.tc.callId }, '[TOOL] read-only exec result received');
+    }
+    else {
+        logger.warn({ tool: ctx.tc.name, callId: ctx.tc.callId }, '[TOOL] read-only exec ended without result');
+    }
+
+    if (!completedFrame) {
+        const finalized = finalizeToolCall({
+            roundContext,
+            messages,
+            cursorToolType: ctx.cursorToolType,
+            toolName: ctx.tc.name,
+            callId: ctx.tc.callId,
+            startedArgs: ctx.startedArgs,
+            rawToolResult: toolResult,
+            input: ctx.sanitizedInput,
+            modelCallId: ctx.modelCallId,
+            readContext,
+        });
+        completedFrame = finalized.frame;
+    }
+
+    return completedFrame;
+}
+
 // ── Task 并发支持 ──
 
 /** Phase 1: 发送 toolCallStarted + execMessage，不等待结果 */

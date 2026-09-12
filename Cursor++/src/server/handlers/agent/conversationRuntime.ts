@@ -16,7 +16,7 @@ import { extractPlainTextContent, flushMessageBlobs, hydrateHistoryEntries, rebu
 import { buildMessages, workspaceUris } from './protocol'
 import { checkpoint, editToolCallStreamDelta, heartbeat, kvMessage, partialToolCall, summary, summaryCompleted, summaryStarted, translateStream, userMessageAppended } from './stream'
 import { buildSummaryUserMessage, SUMMARY_SYSTEM_PROMPT } from './summaryPrompt'
-import { finalizeTaskResult, launchTaskTool, runToolCall, type TaskLaunchContext } from './toolRuntime'
+import { finalizeLaunchedReadOnlyTool, finalizeTaskResult, isReadOnlyToolLaunchEligible, launchReadOnlyTool, launchTaskTool, runToolCall, type ReadOnlyToolLaunchContext, type TaskLaunchContext } from './toolRuntime'
 import { awaitExecResultAndClose, waitForPromiseWithHeartbeat } from './wait'
 import { restoreBlobMessageToLLMMessage } from './transcript'
 import { ActiveTurnTracker, createCurrentTurnUserMessageBlob, readTurnBaseline } from './turnTracker'
@@ -1273,8 +1273,73 @@ export async function* handleConversationRun(
       if (taskLaunches.length > 1)
         logger.info({ count: taskLaunches.length, callIds: taskLaunches.map(t => t.tc.callId) }, '[AGENT] task tools launched concurrently')
 
-      // ── Phase 2: 串行执行非 Task 工具（edit, shell, glob 等） ──
+      // ── Phase 2: 只读工具（Read/Grep/Glob/ReadLints）三段式并发 ──
+      //
+      // 5 个并发 Read 在串行路径下是 5 次完整客户端往返；只读工具无共享副作用，
+      // 可安全并发启动/等待。白名单外工具（Edit/Shell/交互/Await 等）保持原
+      // for-await 串行路径不变。
+      const readOnlyLaunches: ReadOnlyToolLaunchContext[] = []
+      const serialCalls: typeof nonTaskCalls = []
       for (const tc of nonTaskCalls) {
+        if (session && isReadOnlyToolLaunchEligible({
+          toolCall: tc,
+          availableMcpTools: parsed.mcpTools,
+          cursorDynamicTools: parsed.cursorDynamicTools,
+        })) {
+          const ctx = yield* launchReadOnlyTool({
+            toolCall: tc,
+            availableMcpTools: parsed.mcpTools,
+            conversationId: parsed.conversationId,
+            currentModelId: parsed.modelId,
+            round,
+            session,
+            roundContext,
+            messages,
+            allocateExecMessageId: () => ++blobCounter,
+            cursorDynamicTools: parsed.cursorDynamicTools,
+          })
+          if (ctx) {
+            readOnlyLaunches.push(ctx)
+          }
+          else {
+            // launch 兜底拒绝（构建失败等）时不发任何帧 —— 回退串行路径统一处理
+            serialCalls.push(tc)
+          }
+          continue
+        }
+        serialCalls.push(tc)
+      }
+
+      if (readOnlyLaunches.length > 1)
+        logger.info({ count: readOnlyLaunches.length, callIds: readOnlyLaunches.map(ctx => ctx.tc.callId) }, '[AGENT] read-only tools launched concurrently')
+
+      // ── Phase 2b: 并发等待全部只读结果（cancel 时 Promise.all 快速失败） ──
+      if (readOnlyLaunches.length > 0 && session) {
+        const readOnlyResults = yield* waitForPromiseWithHeartbeat(
+          Promise.all(readOnlyLaunches.map(ctx => awaitExecResultAndClose(session, ctx.execMessageId))),
+        )
+
+        // ── Phase 2c: 按原调用顺序逐个收尾，保证工具结果帧顺序稳定 ──
+        for (let i = 0; i < readOnlyLaunches.length; i++) {
+          const frame = finalizeLaunchedReadOnlyTool(
+            readOnlyLaunches[i],
+            readOnlyResults[i],
+            roundContext,
+            messages,
+            roundImageBlocks,
+            readContext,
+          )
+          const completedToolCall = extractCompletedToolCall(frame)
+          if (activeTurn && completedToolCall) {
+            const toolBlob = activeTurn.addCompletedToolCall(completedToolCall)
+            yield cacheAndBuildKvBlob(++blobCounter, toolBlob)
+          }
+          yield frame
+        }
+      }
+
+      // ── Phase 2 fallback: 串行执行白名单外工具（edit, shell, 交互等） ──
+      for (const tc of serialCalls) {
         const toolFrames = runToolCall({
           toolCall: tc,
           availableMcpTools: parsed.mcpTools,
