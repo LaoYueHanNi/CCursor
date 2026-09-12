@@ -1,12 +1,11 @@
 import type { LLMContentBlock } from '../handlers/llm/types'
 import { expect, it } from 'vitest'
-import { llmMessageToBlobMessage, normalizeBlobMessage, restoreBlobMessageToLLMMessage } from '../handlers/agent/transcript'
+import { normalizeBlobMessage, restoreBlobMessageToLLMMessage } from '../handlers/agent/transcript'
 import {
   encodeAnthropicRequestMessages,
   encodeGeminiRequestMessages,
   openAIChatConversationCodec,
 } from '../handlers/llm/conversationCodec'
-import { normalizeStoredTranscript } from '../handlers/llm/semanticConversation'
 
 it('transcript normalization preserves tool-result toolName and error flags', () => {
   const normalized = normalizeBlobMessage({
@@ -26,27 +25,6 @@ it('transcript normalization preserves tool-result toolName and error flags', ()
   const block = restored?.content[0] as { toolName: string, isError: boolean }
   expect(block.toolName).toBe('grep_search')
   expect(block.isError).toBe(true)
-})
-
-it('stored transcript normalization keeps reasoning signatures and semantic tool batches', () => {
-  const blob = normalizeBlobMessage(llmMessageToBlobMessage({
-    role: 'assistant',
-    content: [
-      { type: 'thinking', text: 'reason', signature: 'sig-1', providerOptions: { cursor: { modelName: 'gpt-5.4-medium' } } },
-      { type: 'text', text: 'answer' },
-      { type: 'tool_use', id: 'call-1', name: 'ReadFile', input: { path: 'a.ts' } },
-    ],
-  }))
-
-  const restored = restoreBlobMessageToLLMMessage(blob as unknown as Record<string, unknown>)
-  expect(restored).toBeTruthy()
-  const turns = normalizeStoredTranscript([blob])
-  expect(turns.length).toBe(1)
-  expect(turns[0]?.kind).toBe('assistant')
-  if (turns[0]?.kind !== 'assistant')
-    throw new Error('expected assistant turn')
-  expect(turns[0].reasoningBlocks[0]?.signature).toBe('sig-1')
-  expect(turns[0].toolCalls[0]?.toolName).toBe('ReadFile')
 })
 
 it('gemini provider encodes tool response with tool name for functionResponse replay', () => {
@@ -105,36 +83,6 @@ it('openai conversation codec collapses user/tool messages and strips assistant 
   expect(normalized[2]?.role).toBe('tool')
   expect(typeof normalized[2]?.content).toBe('string')
   expect(String(normalized[2]?.content)).toMatch(/file body/)
-})
-
-it('openai conversation codec normalizes stored transcript through provider-specific semantic pipeline', () => {
-  const turns = openAIChatConversationCodec.normalizeStoredTranscript([
-    {
-      role: 'assistant',
-      content: [
-        { type: 'reasoning', text: 'hidden thought', signature: 'sig-1' },
-        { type: 'text', text: 'visible text' },
-        { type: 'tool-call', toolCallId: 'call-1', toolName: 'ReadFile', args: { path: 'a.ts' } },
-      ],
-    },
-    {
-      role: 'tool',
-      content: [
-        { type: 'tool-result', toolCallId: 'call-1', toolName: 'ReadFile', result: 'first result' },
-        { type: 'tool-result', toolCallId: 'call-2', toolName: 'Grep', result: 'second result' },
-      ],
-    },
-  ])
-
-  expect(turns.length).toBe(3)
-  expect(turns[0]?.kind).toBe('assistant')
-  if (turns[0]?.kind !== 'assistant')
-    throw new Error('expected assistant turn')
-  expect(turns[0].reasoningBlocks.length).toBe(0)
-  expect(turns[0].textBlocks[0]).toBe('visible text')
-  expect(turns[0].toolCalls[0]?.toolName).toBe('ReadFile')
-  expect(turns[1]?.kind).toBe('tool_results')
-  expect(turns[2]?.kind).toBe('tool_results')
 })
 
 it('anthropic request encoding keeps system text and tool error metadata', () => {

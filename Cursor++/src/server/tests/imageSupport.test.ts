@@ -1,7 +1,7 @@
 import type { LLMContentBlock, LLMMessage } from '../handlers/llm/types'
 import { expect, it } from 'vitest'
 import { buildMessages, parseRunRequest } from '../handlers/agent/protocol'
-import { llmMessageToBlobMessage, normalizeBlobMessage, restoreBlobMessageToLLMMessage } from '../handlers/agent/transcript'
+import { normalizeBlobMessage, restoreBlobMessageToLLMMessage } from '../handlers/agent/transcript'
 import {
   anthropicConversationCodec,
   encodeAnthropicRequestMessages,
@@ -540,26 +540,6 @@ it('image block survives normalizeBlobMessage → restoreBlobMessageToLLMMessage
   const txtBlock = blocks[1] as Extract<LLMContentBlock, { type: 'text' }>
   expect(txtBlock.type).toBe('text')
   expect(txtBlock.text).toBe('describe this screenshot')
-})
-
-it('image block survives llmMessageToBlobMessage → restoreBlobMessageToLLMMessage round-trip', () => {
-  const original: LLMMessage = {
-    role: 'user',
-    content: [
-      { type: 'image', mimeType: 'image/jpeg', data: TINY_PNG_BASE64 },
-      { type: 'text', text: 'what is this' },
-    ],
-  }
-
-  const stored = llmMessageToBlobMessage(original)
-  const restored = restoreBlobMessageToLLMMessage(stored as unknown as Record<string, unknown>)
-
-  expect(restored).toBeTruthy()
-  const blocks = restored!.content as LLMContentBlock[]
-  const imgBlock = blocks.find(b => b.type === 'image') as Extract<LLMContentBlock, { type: 'image' }>
-  expect(imgBlock).toBeTruthy()
-  expect(imgBlock.mimeType).toBe('image/jpeg')
-  expect(imgBlock.data).toBe(TINY_PNG_BASE64)
 })
 
 it('mixed content with image + tool_use + text normalizes and restores correctly', () => {

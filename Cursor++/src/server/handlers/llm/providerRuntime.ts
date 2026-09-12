@@ -18,13 +18,10 @@ import {
     openAIResponsesConversationCodec,
     type ProviderConversationCodec,
 } from './conversationCodec';
-import type { SemanticTurn } from './semanticConversation';
-import { llmMessageToStoredMessage } from './storedTranscript';
 import { filterToolsForMode } from '../agent/toolkit/types';
 
 export interface PreparedProviderConversation {
     normalizedMessages: LLMMessage[];
-    semanticTurns: SemanticTurn[];
 }
 
 export interface PreparedProviderRequest {
@@ -134,10 +131,7 @@ export function resolveProviderRuntime(modelId: string): ProviderRuntime {
     const providerEntry = resolved.providerEntry ?? syntheticProviderEntry(resolved.provider);
     const prepareConversation = (messages: LLMMessage[]): PreparedProviderConversation => {
         const normalizedMessages = conversationCodec.normalizeMessages(messages);
-        return {
-            normalizedMessages,
-            semanticTurns: conversationCodec.normalizeStoredTranscript(normalizedMessages.map(llmMessageToStoredMessage)),
-        };
+        return { normalizedMessages };
     };
     const listRuntimeTools = (extraTools: LLMTool[] = [], mode?: string, isSubagent = false, disabledTools?: Set<string>, builtinToolsOverride?: LLMTool[]): LLMTool[] => {
         let builtins = builtinToolsOverride ?? promptProfile.toolCatalog.listBuiltins();

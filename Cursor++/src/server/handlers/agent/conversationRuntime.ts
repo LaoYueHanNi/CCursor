@@ -1022,7 +1022,6 @@ export async function* handleConversationRun(
       logger.info({
         round,
         codec: route.conversationCodec.name,
-        semanticTurns: preparedRequest.conversation.semanticTurns.map(turn => turn.kind),
         toolCatalogProvider: route.toolCatalog.provider,
         toolCatalogVariant: route.toolCatalog.variant,
         builtinsCount: route.toolCatalog.listBuiltins().length,

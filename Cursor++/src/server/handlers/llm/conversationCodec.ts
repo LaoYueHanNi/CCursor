@@ -8,17 +8,12 @@ import type {
   ChatCompletionToolMessageParam,
 } from 'openai/resources/chat/completions'
 import type { Provider } from '../../runtime-config'
-import type { SemanticTurn } from './semanticConversation'
-import type { StoredMessage } from './storedTranscript'
 import type { LLMContentBlock, LLMMessage, LLMTool } from './types'
-import { normalizeStoredTranscript as normalizeSemanticTranscript } from './semanticConversation'
 
 export interface ProviderConversationCodec {
   readonly provider: Provider
   readonly name: string
   normalizeMessages: (messages: LLMMessage[]) => LLMMessage[]
-  normalizeStoredTranscript: (messages: StoredMessage[]) => SemanticTurn[]
-  normalizeSemanticTurns: (turns: SemanticTurn[]) => SemanticTurn[]
 }
 
 abstract class BaseConversationCodec implements ProviderConversationCodec {
@@ -31,14 +26,6 @@ abstract class BaseConversationCodec implements ProviderConversationCodec {
     return messages
       .map(message => this.normalizeMessage(message))
       .filter((message): message is LLMMessage => message !== null)
-  }
-
-  normalizeStoredTranscript(messages: StoredMessage[]): SemanticTurn[] {
-    return this.normalizeSemanticTurns(normalizeSemanticTranscript(messages))
-  }
-
-  normalizeSemanticTurns(turns: SemanticTurn[]): SemanticTurn[] {
-    return turns
   }
 
   protected abstract normalizeMessage(message: LLMMessage): LLMMessage | null
@@ -69,30 +56,6 @@ class AnthropicConversationCodec extends BaseConversationCodec {
 class OpenAIChatConversationCodec extends BaseConversationCodec {
   constructor() {
     super('openai-chat', 'openai-chat')
-  }
-
-  normalizeSemanticTurns(turns: SemanticTurn[]): SemanticTurn[] {
-    const normalized: SemanticTurn[] = []
-    for (const turn of turns) {
-      if (turn.kind === 'assistant') {
-        normalized.push({
-          ...turn,
-          reasoningBlocks: [],
-        })
-        continue
-      }
-      if (turn.kind === 'tool_results' && turn.results.length > 1) {
-        for (const result of turn.results) {
-          normalized.push({
-            kind: 'tool_results',
-            results: [result],
-          })
-        }
-        continue
-      }
-      normalized.push(turn)
-    }
-    return normalized
   }
 
   protected normalizeMessage(message: LLMMessage): LLMMessage | null {
@@ -146,23 +109,6 @@ class OpenAIChatConversationCodec extends BaseConversationCodec {
 class GeminiConversationCodec extends BaseConversationCodec {
   constructor() {
     super('gemini', 'gemini-native')
-  }
-
-  normalizeSemanticTurns(turns: SemanticTurn[]): SemanticTurn[] {
-    const normalized: SemanticTurn[] = []
-    for (const turn of turns) {
-      if (turn.kind === 'tool_results' && turn.results.length > 1) {
-        for (const result of turn.results) {
-          normalized.push({
-            kind: 'tool_results',
-            results: [result],
-          })
-        }
-        continue
-      }
-      normalized.push(turn)
-    }
-    return normalized
   }
 
   protected normalizeMessage(message: LLMMessage): LLMMessage | null {
@@ -453,7 +399,7 @@ export function encodeGeminiRequestMessages(messages: LLMMessage[]): {
     .map(m => toGeminiContent(m))
 
   // Gemini 要求: model turn 含 N 个 functionCall → 紧接的 user turn 必须含恰好 N 个 functionResponse。
-  // BYOK 上游(normalizeSemanticTurns)把多 tool_results 拆成独立 LLMMessage(Anthropic/OpenAI 需要),
+  // BYOK 上游把多 tool_results 拆成独立 LLMMessage(Anthropic/OpenAI 需要),
   // 但 Gemini 需要合并——相邻的 role:user + 全 functionResponse 的 Content 合为一个。
   const contents: Content[] = []
   for (const c of rawContents) {
@@ -554,11 +500,6 @@ function toGeminiContent(msg: LLMMessage): Content {
 class OpenAIResponsesConversationCodec extends BaseConversationCodec {
   constructor() {
     super('openai-responses', 'openai-responses')
-  }
-
-  normalizeSemanticTurns(turns: SemanticTurn[]): SemanticTurn[] {
-    // Responses API 支持 reasoning, 不需要丢弃 reasoningBlocks
-    return turns
   }
 
   protected normalizeMessage(message: LLMMessage): LLMMessage | null {

@@ -184,7 +184,7 @@ it('routeModel exposes conversation codec aligned with prompt profile', () => {
   expect(geminiRoute.promptProfile.provider).toBe('gemini')
 })
 
-it('provider runtime prepares normalized messages and semantic turns together', () => {
+it('provider runtime prepares normalized messages for the provider codec', () => {
   const runtime = resolveProviderRuntime('gpt-5.4-medium')
   const prepared = runtime.prepareConversation([
     { role: 'system', content: 'sys' },
@@ -200,10 +200,6 @@ it('provider runtime prepares normalized messages and semantic turns together', 
   ])
 
   expect(prepared.normalizedMessages.length).toBe(3)
-  expect(prepared.semanticTurns.length).toBe(3)
-  expect(prepared.semanticTurns[0]?.kind).toBe('system')
-  expect(prepared.semanticTurns[1]?.kind).toBe('user')
-  expect(prepared.semanticTurns[2]?.kind).toBe('assistant')
   const assistant = prepared.normalizedMessages[2]
   expect(Array.isArray(assistant?.content)).toBeTruthy()
   const blocks = assistant?.content as LLMContentBlock[]
@@ -300,8 +296,6 @@ it('provider runtime prepares provider stream requests from runtime metadata', (
   expect(prepared.request.messages.length).toBe(2)
   expect(prepared.request.tools?.some(tool => tool.name === 'Read')).toBe(true)
   expect(prepared.request.tools?.some(tool => tool.name === 'user-Context7-query-docs')).toBe(true)
-  expect(prepared.conversation.semanticTurns[0]?.kind).toBe('system')
-  expect(prepared.conversation.semanticTurns[1]?.kind).toBe('user')
 })
 
 it('provider state strategy batches anthropic tool results but flushes canonical tool-role messages', () => {

@@ -1,7 +1,6 @@
 import type { StoredMessage } from '../llm/storedTranscript'
 import type { LLMContentBlock, LLMMessage } from '../llm/types'
 import {
-  llmMessageToStoredMessage,
   normalizeStoredMessage,
   restoreStoredMessage,
   storedMessageToLLMMessage,
@@ -25,10 +24,6 @@ export function normalizeBlobMessage(message: BlobMessage): StoredMessage {
 export function restoreBlobMessageToLLMMessage(message: Record<string, unknown>): LLMMessage | null {
   const stored = restoreStoredMessage(message)
   return stored ? storedMessageToLLMMessage(stored) : null
-}
-
-export function llmMessageToBlobMessage(message: LLMMessage): StoredMessage {
-  return llmMessageToStoredMessage(message)
 }
 
 export function summarizeAssistantContent(content: string | LLMContentBlock[] | undefined): { thinking?: string, text?: string } {
