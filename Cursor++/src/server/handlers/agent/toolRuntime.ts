@@ -28,6 +28,7 @@ import {
 import { finalizeToolCall } from './toolLifecycle';
 import { buildEditPlan, buildExecArgs, mapToolToExecArgs, resolveToolCall, type AvailableDynamicBuiltinTool, type AvailableMcpTool, type ToolCallInfo } from './tools';
 import { getBackgroundJob, registerBackgroundJob, type AgentSession } from './session';
+import { checkYoloAllowlistShortCircuit } from './yoloAllowlist';
 import { buildExecToolResult } from './toolResults';
 import { str } from './toolkit/results/shared';
 import { waitForInteractionResponseWithHeartbeat, waitForPromiseWithHeartbeat } from './wait';
@@ -387,34 +388,45 @@ async function* runToolCallInner(params: Parameters<typeof runToolCall>[0]): Asy
         // smartModeApproval, 客户端弹审批卡并展示理由。
         if (cursorToolType === 'shellToolCall' && params.smartModeAutoReviewEnabled === true) {
             const command = typeof sanitizedInput.command === 'string' ? sanitizedInput.command : '';
-            const outcome = await classifySmartAutoReview({
-                toolCallId: tc.callId,
-                target: {
-                    action: 'Shell',
-                    arguments: {
-                        command,
-                        workingDirectory: typeof sanitizedInput.workingDirectory === 'string' ? sanitizedInput.workingDirectory : '',
-                    },
-                },
-                conversationContext: buildClassifierConversationContext(params.messages),
-                mode: 'auto_review',
-            });
-            logger.info(
-                {
-                    callId: tc.callId,
-                    commandPreview: command.slice(0, 120),
-                    decision: outcome.decision,
-                    reason: outcome.reason?.slice(0, 200),
-                    fallback: outcome.fallback ?? false,
-                    classifierModel: outcome.classifierModel,
-                },
-                '[AUTO-REVIEW] shell preflight',
-            );
-            if (outcome.decision === 'allow') {
+            // 命中用户在 Cursor 设置里配置的自动运行白名单 → 等价于客户端本地放行,
+            // 跳过分类器调用 (读取失败/不确定一律走原分类流程, 见 yoloAllowlist.ts)
+            if (await checkYoloAllowlistShortCircuit(command)) {
+                logger.info(
+                    { callId: tc.callId, commandPreview: command.slice(0, 120) },
+                    '[AUTO-REVIEW] allowlist short-circuit',
+                );
                 args.skipApproval = true;
             }
-            else if (outcome.reason) {
-                args.smartModeApproval = { requestId: randomUUID(), reason: outcome.reason };
+            else {
+                const outcome = await classifySmartAutoReview({
+                    toolCallId: tc.callId,
+                    target: {
+                        action: 'Shell',
+                        arguments: {
+                            command,
+                            workingDirectory: typeof sanitizedInput.workingDirectory === 'string' ? sanitizedInput.workingDirectory : '',
+                        },
+                    },
+                    conversationContext: buildClassifierConversationContext(params.messages),
+                    mode: 'auto_review',
+                });
+                logger.info(
+                    {
+                        callId: tc.callId,
+                        commandPreview: command.slice(0, 120),
+                        decision: outcome.decision,
+                        reason: outcome.reason?.slice(0, 200),
+                        fallback: outcome.fallback ?? false,
+                        classifierModel: outcome.classifierModel,
+                    },
+                    '[AUTO-REVIEW] shell preflight',
+                );
+                if (outcome.decision === 'allow') {
+                    args.skipApproval = true;
+                }
+                else if (outcome.reason) {
+                    args.smartModeApproval = { requestId: randomUUID(), reason: outcome.reason };
+                }
             }
         }
         const execId = `${tc.callId}-exec`;

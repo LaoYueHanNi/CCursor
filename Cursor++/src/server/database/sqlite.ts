@@ -85,7 +85,7 @@ function getCursorAppCandidates(): string[] {
   return candidates
 }
 
-function loadSqlite3(): Sqlite3Module {
+export function loadSqlite3(): Sqlite3Module {
   if (sqlite3Module)
     return sqlite3Module
 
