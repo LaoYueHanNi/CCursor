@@ -22,14 +22,20 @@
       7. patch-katex.js        workbench.html 的 KaTeX CSS
 
     每组补丁在落盘前都会写一份 <file>.backup-byok-<tag>-<ts> 备份；
-    uninstall 按相反顺序还原备份并删除扩展目录。因此
-    update == uninstall + install，改了扩展或补丁之后直接 update 即可。
+    uninstall 按相反顺序还原备份并删除扩展目录。
+
+    install / update 均为一条龙部署：前置自动执行 installer 的 build:vsix
+    （保证部署的 vsix 与当前源码一致，避免"忘打包部署旧产物"），
+    再 uninstall（容错，首次安装时此步失败可忽略）→ install。
+    之所以要先卸载：installer 的 install 幂等预检在"扩展已装 + 补丁完好"时
+    直接返回，新 vsix 永远不会被解压 —— 必须先卸载重装才能更新扩展。
 
 .PARAMETER Action
     要执行的动作，默认 status（只读，最安全）。
-      install    安装：释放默认配置 → 解压 vsix → 按顺序打全部补丁
+      install    一条龙部署：build:vsix → uninstall(容错) → install
       uninstall  卸载：按备份倒序还原所有补丁 → 删除 cursor2plus 扩展目录
-      update     更新：先 uninstall 再 install
+      update     与 install 相同（保留别名兼容）
+      build      只打包 vsix（check-types + lint + esbuild + vsce package），不部署
       status     检查各组补丁与 ~/.ccursor 配置的当前状态（只读）
       check      干跑：校验所有 AST 补丁锚点是否仍可命中，不改动任何文件
       help       显示本帮助与路径信息
@@ -37,9 +43,16 @@
 .PARAMETER InstallerDir
     installer 包所在目录，默认为脚本同级的 installer/。
 
+.PARAMETER SkipBuild
+    install / update 时跳过前置 build:vsix（用于手动打包后的纯重装场景）。
+
 .EXAMPLE
-    ./ccursor.ps1 update
-    重新部署扩展与全部补丁（先还原再安装）。
+    ./ccursor.ps1 install
+    改完代码后一条龙部署：自动打包 vsix → 卸载重装 → 提示重启 Cursor。
+
+.EXAMPLE
+    ./ccursor.ps1 install -SkipBuild
+    跳过打包，用 installer/vsix/ 里现有的包重装。
 
 .EXAMPLE
     ./ccursor.ps1 check
@@ -56,12 +69,15 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Position = 0, HelpMessage = '要执行的动作：install / uninstall / update / status / check / help')]
-    [ValidateSet('install', 'uninstall', 'update', 'status', 'check', 'help')]
+    [Parameter(Position = 0, HelpMessage = '要执行的动作：install / uninstall / update / build / status / check / help')]
+    [ValidateSet('install', 'uninstall', 'update', 'build', 'status', 'check', 'help')]
     [string]$Action = 'status',
 
     [Parameter(HelpMessage = 'installer 包所在目录，默认为脚本同级的 installer/')]
-    [string]$InstallerDir
+    [string]$InstallerDir,
+
+    [Parameter(HelpMessage = 'install / update 时跳过前置 build:vsix')]
+    [switch]$SkipBuild
 )
 
 Set-StrictMode -Version Latest
@@ -90,20 +106,24 @@ if ($Action -eq 'help') {
 ccursor.ps1 —— Cursor++ 安装 / 更新 / 卸载入口
 
 用法:
-  ./ccursor.ps1 [-Action] <install|uninstall|update|status|check|help> [-InstallerDir <路径>]
+  ./ccursor.ps1 [-Action] <install|uninstall|update|build|status|check|help> [-SkipBuild] [-InstallerDir <路径>]
 
 动作:
-  install      安装：释放 ~/.ccursor 默认配置 → 解压 vsix → 打全部补丁
+  install      一条龙部署：build:vsix → uninstall(容错) → install（改完代码后一条命令）
   uninstall    卸载：按备份倒序还原所有补丁 → 删除 cursor2plus 扩展目录
-  update       更新：先 uninstall 再 install（改了扩展或补丁后重新部署）
+  update       与 install 相同（保留别名兼容）
+  build        只打包 vsix（check-types + lint + esbuild + vsce package），不部署
   status       查看当前安装状态（默认动作，只读）
   check        干跑：校验各补丁锚点是否仍可命中（只读）
   help         显示本帮助
 
+选项:
+  -SkipBuild   install / update 时跳过前置打包，直接用 installer/vsix/ 里现有的包
+
 前置条件:
   - Node.js >= 18
   - installer/dist/cli.cjs 已构建：installer 目录下执行 npm run build
-  - install / update 需要 installer/vsix/*.vsix：installer 目录下执行 npm run build:vsix
+  - install / update 的前置打包需要 pnpm（或用 -SkipBuild 跳过）
 
 环境变量:
   CCURSOR_CURSOR_ROOT   Cursor 装在非默认目录时指向其 resources/app，会被透传给 installer
@@ -158,6 +178,41 @@ if (-not (Test-Path -LiteralPath $cliPath -PathType Leaf)) {
 
 Write-Host ("{0} v{1}  ·  node {2}" -f $pkg.name, $pkg.version, $nodeVersion)
 
+# ---------- 2.5 install / update / build 的前置打包：保证 vsix 与当前源码一致 ----------
+# 踩过的坑：改了扩展源码却直接 install，部署的仍是旧 vsix（扩展目录不变时
+# installer 的幂等预检也会跳过重装）。因此 install/update/build 默认先自动打包。
+if ($Action -in 'install', 'update', 'build' -and -not ($SkipBuild -and $Action -ne 'build')) {
+    if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
+        Write-Err '未找到 pnpm，无法自动打包 vsix（build:vsix 需要 pnpm）'
+        Write-Host '  手动打包后可加 -SkipBuild 跳过此步：'
+        Write-Host ("    cd `"{0}`"; npm run build:vsix" -f $InstallerDir)
+        Write-Host '  或仅用现有 vsix 重装：./ccursor.ps1 install -SkipBuild'
+        exit 1
+    }
+    Write-Head 'build:vsix (前置打包, install/update 可用 -SkipBuild 跳过)'
+    # 打包子进程可能向 stderr 写进度, 受限的 ErrorActionPreference 会把它误判为终止错误
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        Push-Location $InstallerDir
+        try { npm run build:vsix }
+        finally { Pop-Location }
+    }
+    finally {
+        $ErrorActionPreference = $prevEap
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err 'build:vsix 失败，中止'
+        exit $LASTEXITCODE
+    }
+}
+
+# build 动作到打包为止, 不转发给 CLI (CLI 无此子命令)
+if ($Action -eq 'build') {
+    Write-Ok 'build:vsix 完成（未部署；部署请运行 install / update）'
+    exit 0
+}
+
 # install / update 依赖 vsix：installer 只会解压 vsix 目录里的一个包
 if ($Action -in 'install', 'update') {
     $vsixFiles = @()
@@ -189,17 +244,32 @@ if ($Action -in 'install', 'uninstall', 'update') {
 }
 
 # ---------- 4. 转发给 installer CLI ----------
-Write-Head "ccursor $Action"
-& node $cliPath $Action
+# install / update 一条龙收尾：先卸载（容错，首次安装时此步失败可忽略）再安装。
+# 直接 install 会被 installer 的幂等预检拦下（"Already fully installed"），
+# 新 vsix 永远不会被解压 —— 必须先卸载重装才能更新扩展。
+if ($Action -in 'install', 'update') {
+    Write-Head 'ccursor uninstall (重装前置, 首次安装时此步失败可忽略)'
+    & node $cliPath uninstall
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn 'uninstall 未成功（通常是首次安装，无可卸载内容），继续安装'
+    }
+    $cliAction = 'install'
+}
+else {
+    $cliAction = $Action
+}
+
+Write-Head "ccursor $cliAction"
+& node $cliPath $cliAction
 $exitCode = $LASTEXITCODE
 
 Write-Host ''
 if ($exitCode -ne 0) {
-    Write-Err "ccursor $Action 失败（退出码 $exitCode）"
+    Write-Err "ccursor $cliAction 失败（退出码 $exitCode）"
     exit $exitCode
 }
 
-Write-Ok "ccursor $Action 执行完成"
+Write-Ok "ccursor $cliAction 执行完成"
 if ($Action -in 'install', 'uninstall', 'update') {
     Write-Warn '请重启 Cursor 使改动生效。'
 }
